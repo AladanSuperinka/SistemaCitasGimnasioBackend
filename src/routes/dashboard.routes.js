@@ -1,6 +1,13 @@
 const express = require("express");
 const router = express.Router();
-const db = require("../db"); // <- cambia esto si tu conexión se llama distinto
+
+const db = require("../db");
+const auth = require("../middleware/auth");
+const authorize = require("../middleware/authorize");
+
+// Todo el dashboard queda protegido.
+// Solo ADMIN puede ver estadísticas generales.
+router.use(auth, authorize("ADMIN"));
 
 // GET /api/dashboard/stats
 router.get("/stats", async (req, res) => {
@@ -10,20 +17,18 @@ router.get("/stats", async (req, res) => {
     const [[schedules]] = await db.query("SELECT COUNT(*) AS n FROM schedules");
     const [[enrollments]] = await db.query("SELECT COUNT(*) AS n FROM enrollments");
 
-    // ✅ capacity NO está en schedules, está en classes
-    // total_capacity = SUM(classes.capacity) por cada schedule
+    // total_capacity = SUM(capacity de la clase por cada horario creado)
     const [[cap]] = await db.query(`
-      SELECT COALESCE(SUM(c.capacity),0) AS total_capacity
+      SELECT COALESCE(SUM(c.capacity), 0) AS total_capacity
       FROM schedules s
-      JOIN classes c ON c.id = s.class_id
+      INNER JOIN classes c ON c.id = s.class_id
     `);
 
-    // ✅ cupos libres totales = SUM(classes.capacity - inscritos_por_horario)
-    // Usamos LEFT JOIN para incluir horarios sin inscritos
+    // cupos libres totales = SUM(capacidad de clase - inscritos por horario)
     const [[spots]] = await db.query(`
-      SELECT COALESCE(SUM(c.capacity - IFNULL(x.enrolled, 0)),0) AS total_spots_left
+      SELECT COALESCE(SUM(c.capacity - IFNULL(x.enrolled, 0)), 0) AS total_spots_left
       FROM schedules s
-      JOIN classes c ON c.id = s.class_id
+      INNER JOIN classes c ON c.id = s.class_id
       LEFT JOIN (
         SELECT schedule_id, COUNT(*) AS enrolled
         FROM enrollments
@@ -39,9 +44,9 @@ router.get("/stats", async (req, res) => {
       total_capacity: Number(cap.total_capacity || 0),
       total_spots_left: Number(spots.total_spots_left || 0),
     });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Error en stats" });
+  } catch (error) {
+    console.error("dashboard stats error:", error);
+    res.status(500).json({ message: "Error obteniendo estadísticas del dashboard" });
   }
 });
 
@@ -49,18 +54,23 @@ router.get("/stats", async (req, res) => {
 router.get("/top-classes", async (req, res) => {
   try {
     const [rows] = await db.query(`
-      SELECT c.id AS class_id, c.name AS class_name, c.level, COUNT(e.id) AS enrolled
+      SELECT
+        c.id AS class_id,
+        c.name AS class_name,
+        c.level,
+        COUNT(e.id) AS enrolled
       FROM enrollments e
-      JOIN schedules s ON s.id = e.schedule_id
-      JOIN classes c ON c.id = s.class_id
+      INNER JOIN schedules s ON s.id = e.schedule_id
+      INNER JOIN classes c ON c.id = s.class_id
       GROUP BY c.id, c.name, c.level
-      ORDER BY enrolled DESC
+      ORDER BY enrolled DESC, c.name ASC
       LIMIT 10
     `);
+
     res.json(rows);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Error en top-classes" });
+  } catch (error) {
+    console.error("dashboard top-classes error:", error);
+    res.status(500).json({ message: "Error obteniendo clases más demandadas" });
   }
 });
 
@@ -80,8 +90,8 @@ router.get("/top-schedules", async (req, res) => {
         COUNT(e.id) AS enrolled,
         (c.capacity - COUNT(e.id)) AS spots_left
       FROM schedules s
-      JOIN classes c ON c.id = s.class_id
-      JOIN admins a ON a.id = s.instructor_id
+      INNER JOIN classes c ON c.id = s.class_id
+      INNER JOIN admins a ON a.id = s.instructor_id
       LEFT JOIN enrollments e ON e.schedule_id = s.id
       GROUP BY
         s.id,
@@ -92,16 +102,15 @@ router.get("/top-schedules", async (req, res) => {
         s.start_time,
         s.end_time,
         c.capacity
-      ORDER BY enrolled DESC
+      ORDER BY enrolled DESC, c.name ASC
       LIMIT 10
     `);
 
     res.json(rows);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Error en top-schedules" });
+  } catch (error) {
+    console.error("dashboard top-schedules error:", error);
+    res.status(500).json({ message: "Error obteniendo horarios más llenos" });
   }
 });
-
 
 module.exports = router;
